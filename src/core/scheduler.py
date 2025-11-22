@@ -1,5 +1,3 @@
-# src/core/scheduler.py
-
 from __future__ import annotations
 
 import asyncio
@@ -8,7 +6,7 @@ import logging
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+
 from src.core.db import async_session_maker
 from src.models.post import Post, PostStatus
 from src.models.media_asset import MediaAsset
@@ -42,7 +40,10 @@ async def process_queue_once(session: AsyncSession) -> None:
     res = await session.execute(stmt)
     post = res.scalar_one_or_none()
     if not post:
+        logger.debug("[scheduler] no planned posts to publish")
         return  # пока нечего публиковать
+
+    logger.info("[scheduler] processing planned post %s", post.id)
 
     # 2. Получаем аккаунт и медиа
     acc_res = await session.execute(
@@ -62,7 +63,12 @@ async def process_queue_once(session: AsyncSession) -> None:
         post.error = "Account or media not found"
         post.attempt += 1
         await session.commit()
-        logger.error("[scheduler] account or media not found for post %s", post.id)
+        logger.error(
+            "[scheduler] account or media not found for post %s (account=%s, media=%s)",
+            post.id,
+            post.account_id,
+            post.media_id,
+        )
         return
 
     # 3. Помечаем, что начали публикацию
@@ -71,6 +77,13 @@ async def process_queue_once(session: AsyncSession) -> None:
     post.attempt += 1
     post.error = None
     await session.commit()
+    logger.info(
+        "[scheduler] start publishing post %s (account=%s, media=%s, attempt=%s)",
+        post.id,
+        post.account_id,
+        post.media_id,
+        post.attempt,
+    )
 
     try:
         ig_media_id = await publish_reel_to_instagram(

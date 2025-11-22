@@ -1,9 +1,8 @@
-# src/integrations/instagram.py
-
 from __future__ import annotations
 
 from typing import Optional
 import asyncio
+import logging
 
 import httpx
 
@@ -12,6 +11,9 @@ from src.models.instagram_account import InstagramAccount
 from src.models.media_asset import MediaAsset
 
 API_PUBLIC_URL = settings.API_PUBLIC_URL
+GRAPH_API_VERSION = "v21.0"
+
+logger = logging.getLogger("instagram")
 
 
 class InstagramPublishError(Exception):
@@ -30,19 +32,36 @@ async def _wait_for_container_ready(
     Если статус ERROR или по таймауту — выбрасывает InstagramPublishError.
     """
 
-    status_url = f"https://graph.facebook.com/v21.0/{creation_id}"
+    status_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{creation_id}"
     elapsed = 0
     last_status: Optional[str] = None
+
+    logger.info(
+        "[instagram] wait container %s ready (max_wait=%s, poll=%s)",
+        creation_id,
+        max_wait_seconds,
+        poll_interval_seconds,
+    )
 
     while elapsed < max_wait_seconds:
         resp = await client.get(
             status_url,
             params={
-                "fields": "status_code",
+                # добавили больше полей для нормального дебага
+                "fields": "status_code,status,error_message",
                 "access_token": access_token,
             },
         )
+
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise InstagramPublishError(
+                f"HTTP error while checking media container status: {e}"
+            ) from e
+
         data = resp.json()
+        logger.debug("[instagram] container %s status poll: %s", creation_id, data)
 
         if "error" in data:
             raise InstagramPublishError(
@@ -54,10 +73,11 @@ async def _wait_for_container_ready(
 
         if status == "FINISHED":
             # Контейнер готов, можно публиковать
+            logger.info("[instagram] container %s finished", creation_id)
             return
 
         if status == "ERROR":
-            # Instagram не смог обработать медиаданные (неподходящий формат и т.п.)
+            # Instagram не смог обработать медиаданные (неподходящий формат, кодек и т.п.)
             raise InstagramPublishError(
                 f"Media container processing failed with status ERROR: {data}"
             )
@@ -92,8 +112,16 @@ async def publish_reel_to_instagram(
     # ПУБЛИЧНЫЙ URL до файла, который доступен из интернета
     # и совпадает с роутом в src/api/media.py
     video_url = f"{API_PUBLIC_URL}/media/files/{media.id}"
+    logger.info(
+        "[instagram] publishing reel: account=%s, media=%s, video_url=%s",
+        account.id,
+        media.id,
+        video_url,
+    )
 
-    creation_url = f"https://graph.facebook.com/v21.0/{account.ig_user_id}/media"
+    creation_url = (
+        f"https://graph.facebook.com/{GRAPH_API_VERSION}/{account.ig_user_id}/media"
+    )
 
     async with httpx.AsyncClient(timeout=120) as client:
         # 1) создаём контейнер медиа (REELS)
@@ -107,7 +135,16 @@ async def publish_reel_to_instagram(
             },
         )
 
+        try:
+            creation_resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise InstagramPublishError(
+                f"HTTP error while creating media container: {e}"
+            ) from e
+
         creation_data = creation_resp.json()
+        logger.info("[instagram] creation response: %s", creation_data)
+
         if "error" in creation_data:
             raise InstagramPublishError(
                 f"Error creating media container: {creation_data['error']}"
@@ -129,7 +166,9 @@ async def publish_reel_to_instagram(
         )
 
         # 3) публикуем контейнер
-        publish_url = f"https://graph.facebook.com/v24.0/{account.ig_user_id}/media_publish"
+        publish_url = (
+            f"https://graph.facebook.com/{GRAPH_API_VERSION}/{account.ig_user_id}/media_publish"
+        )
 
         publish_resp = await client.post(
             publish_url,
@@ -139,7 +178,16 @@ async def publish_reel_to_instagram(
             },
         )
 
+        try:
+            publish_resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise InstagramPublishError(
+                f"HTTP error while publishing media: {e}"
+            ) from e
+
         publish_data = publish_resp.json()
+        logger.info("[instagram] publish response: %s", publish_data)
+
         if "error" in publish_data:
             raise InstagramPublishError(
                 f"Error publishing media: {publish_data['error']}"
