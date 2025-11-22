@@ -94,7 +94,7 @@ async def process_queue_once(session: AsyncSession) -> None:
             f"#{t.strip().replace('#', '')}" for t in tags if t and t.strip()
         )
 
-    full_caption = f"{raw_caption}{tags_str}"
+    full_caption = f"{raw_caption}\n\n{tags_str}"
 
     try:
         ig_media_id = await publish_reel_to_instagram(
