@@ -4,7 +4,9 @@ import sys
 
 from sqlalchemy import create_engine
 from alembic import context
-from src.core.config import DATABASE_URL_WITHOUT_ASYNCPG
+from src.core.config import settings
+
+DATABASE_URL_WITHOUT_ASYNCPG = settings.DATABASE_URL_WITHOUT_ASYNCPG
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 SRC_DIR = os.path.join(BASE_DIR, "src")
