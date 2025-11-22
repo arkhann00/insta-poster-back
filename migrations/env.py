@@ -1,33 +1,33 @@
+# migrations/env.py
+
+from __future__ import annotations
+
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
+from alembic import context
 
 from src.core.config import settings
-from src.core.db import Base
+from src.core.db import Base  # если у тебя так называется общий Base для моделей
 
-# Это объект конфигурации Alembic, берёт настройки из alembic.ini
 config = context.config
 
-# Подключаем логирование из alembic.ini, если нужно
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Метаинформация моделей для автогенерации миграций
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
     """
-    Запуск миграций в офлайн-режиме.
-    Alembic сам генерит SQL, не подключаясь к базе.
+    Запуск миграций в offline-режиме.
     """
-
-    url = settings.DATABASE_URL_WITHOUT_ASYNCPG
-    config.set_main_option("sqlalchemy.url", url)
+    # Для offline можешь использовать ту же строку, но тоже экранированную
+    raw_url = settings.DATABASE_URL_WITHOUT_ASYNCPG
+    safe_url = raw_url.replace("%", "%%")
 
     context.configure(
-        url=url,
+        url=safe_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -39,24 +39,24 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """
-    Запуск миграций в онлайн-режиме.
-    Здесь уже реально подключаемся к БД.
+    Запуск миграций в online-режиме (через engine).
     """
+    configuration = config.get_section(config.config_ini_section, {})
 
-    url = settings.DATABASE_URL_WITHOUT_ASYNCPG
-    config.set_main_option("sqlalchemy.url", url)
+    raw_url = settings.DATABASE_URL_WITHOUT_ASYNCPG
+    # КЛЮЧЕВАЯ СТРОКА: экранируем все `%` для ConfigParser
+    safe_url = raw_url.replace("%", "%%")
+
+    configuration["sqlalchemy.url"] = safe_url
 
     connectable = engine_from_config(
-        config.get_section(config.config_ini_section),  # берёт sqlalchemy.url из config
+        configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-        )
+        context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
             context.run_migrations()
