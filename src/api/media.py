@@ -17,6 +17,7 @@ from fastapi import (
     Form,
     status,
 )
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,12 +27,10 @@ from src.models.media_asset import MediaAsset
 from src.models.instagram_account import InstagramAccount
 from src.models.user import User
 from src.api.deps import get_current_user, get_current_admin
-from fastapi import Depends, HTTPException, UploadFile, File, Form, status
-from fastapi.responses import FileResponse
 
 router = APIRouter(prefix="/media", tags=["media"])
 
-# папка для файлов, относительно backend/
+# Папка для файлов, относительно backend/
 MEDIA_ROOT = Path(__file__).resolve().parents[2] / "media"
 MEDIA_ROOT.mkdir(exist_ok=True)
 
@@ -52,10 +51,13 @@ class MediaOut(BaseModel):
         from_attributes = True
 
 
-# ===== Handlers =====
-ALLOWED_VIDEO_EXTS = {".mp4"}
-ALLOWED_VIDEO_MIMES = {"video/mp4"}  # при необходимости расширишь
+# ===== Константы валидации видео =====
 
+ALLOWED_VIDEO_EXTS = {".mp4"}
+ALLOWED_VIDEO_MIMES = {"video/mp4"}
+
+
+# ===== Handlers =====
 
 @router.post(
     "",
@@ -69,8 +71,10 @@ async def upload_media(
     user: User = Depends(get_current_user),
 ):
     """
-    Загрузка видео/файла и сохранение в media_assets.
-    Разрешаем только MP4, чтобы потом всё уверенно работало в браузере и Instagram.
+    Загрузка видео и сохранение в media_assets.
+    Разрешаем только MP4 (video/mp4), чтобы:
+    - Instagram смог нормально обработать файл;
+    - в дальнейшем было меньше сюрпризов.
     """
 
     # 1) Валидация account_id
@@ -92,16 +96,17 @@ async def upload_media(
             detail="Instagram account not found",
         )
 
-    # 2) Проверяем расширение и mime
+    # 2) Проверяем расширение и MIME
     ext = Path(file.filename).suffix.lower()
     mime = file.content_type or ""
 
     if ext not in ALLOWED_VIDEO_EXTS or mime not in ALLOWED_VIDEO_MIMES:
-        # Можно сделать более мягко: принять файл, но пометить как "требует конвертации".
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Поддерживаются только MP4 (video/mp4). "
-                   "Если у тебя .mov — конвертируй в mp4 перед загрузкой.",
+            detail=(
+                "Поддерживаются только MP4 (video/mp4). "
+                "Если у тебя .mov / .qt — конвертируй в mp4 перед загрузкой."
+            ),
         )
 
     # 3) Читаем файл
@@ -126,7 +131,7 @@ async def upload_media(
         storage_provider="local",
         storage_key=str(stored_path.relative_to(MEDIA_ROOT.parent)),  # media/...
         filename=file.filename,
-        mime=mime or "application/octet-stream",
+        mime=mime or "video/mp4",
         size_bytes=len(content),
         duration_ms=None,
         width=None,
@@ -142,13 +147,11 @@ async def upload_media(
 
 
 @router.get("", response_model=list[MediaOut])
-@router.get("", response_model=list[MediaOut])
 async def list_media(
     account_id: uuid.UUID | None = None,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
 ):
-
     """
     Список медиа. Пока без разграничения по пользователям:
     любой авторизованный видит все.
@@ -168,8 +171,12 @@ async def delete_media(
     session: AsyncSession = Depends(get_session),
     admin: User = Depends(get_current_admin),
 ):
+    """
+    Удаление медиа:
+    - удаляем запись из БД
+    - пробуем удалить файл с диска (если есть)
+    """
 
-    # проверяем наличие
     res = await session.execute(
         select(MediaAsset).where(MediaAsset.id == media_id)
     )
@@ -195,11 +202,18 @@ async def delete_media(
     await session.commit()
     return
 
+
 @router.get("/files/{media_id}")
 async def get_media_file(
     media_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
 ):
+    """
+    Отдаём файл по ID.
+    - Для Instagram важно: по этому URL должен быть стабильный доступ к байтам видео.
+    - Для браузера теперь выставляем inline, чтобы плеер мог открыться.
+    """
+
     res = await session.execute(
         select(MediaAsset).where(MediaAsset.id == media_id)
     )
@@ -213,6 +227,7 @@ async def get_media_file(
 
     return FileResponse(
         path,
-        media_type=asset.mime or "application/octet-stream",
-        filename=asset.filename,
+        media_type=asset.mime or "video/mp4",
+        # inline – чтобы браузер мог показать плеер, а не форсить скачивание
+        headers={"Content-Disposition": "inline"},
     )
