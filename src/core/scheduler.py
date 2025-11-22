@@ -85,11 +85,22 @@ async def process_queue_once(session: AsyncSession) -> None:
         post.attempt,
     )
 
+    raw_caption = post.caption or ""
+    tags = post.tags or []  # список строк, например ["reels", "test"]
+
+    tags_str = ""
+    if tags:
+        tags_str = " " + " ".join(
+            f"#{t.strip().replace('#', '')}" for t in tags if t and t.strip()
+        )
+
+    full_caption = f"{raw_caption}{tags_str}"
+
     try:
         ig_media_id = await publish_reel_to_instagram(
             account=account,
             media=media,
-            caption=post.caption,
+            caption=full_caption,
         )
     except InstagramPublishError as e:
         post.status = PostStatus.FAILED
