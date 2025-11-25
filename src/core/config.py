@@ -4,7 +4,7 @@ from pathlib import Path
 from pydantic_settings import SettingsConfigDict, BaseSettings
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-ENV_FILE = BASE_DIR / ".env"
+ENV_FILE = BASE_DIR / ".env.test"
 
 class Settings(BaseSettings):
     DATABASE_URL: str

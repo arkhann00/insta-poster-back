@@ -16,9 +16,6 @@ from .deps import get_current_user, get_current_admin
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
-
-# ===== Pydantic-схемы =====
-
 class AccountBase(BaseModel):
     name: str
     ig_user_id: str
