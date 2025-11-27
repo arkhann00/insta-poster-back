@@ -3,11 +3,16 @@ from typing import List
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+ENV_FILE = BASE_DIR / ".env"
 
 class Settings(BaseSettings):
     # URL подключения к базе (можно переопределить через переменную окружения DATABASE_URL)
     database_url: str = Field(
-        default="postgresql+asyncpg://khaarsyan:Djagarta2005@localhost:5432/insta_poster_db",  # <-- поменяй под свои данные, если нужно
+        default="postgresql://gen_user:Y%3EqI-J%3F8YN2%3Ac_@188.225.10.235:5432/default_db",  # <-- поменяй под свои данные, если нужно
         alias="DATABASE_URL",
     )
 
@@ -28,7 +33,7 @@ class Settings(BaseSettings):
 
     # Публичный URL бэкенда, по которому Instagram будет забирать видео
     backend_base_url: str = Field(
-        default="http://127.0.0.1:8000",
+        default="https://api.xn--80a6ad.space",
         alias="BACKEND_BASE_URL",
     )
 
@@ -40,7 +45,7 @@ class Settings(BaseSettings):
 
     # Настройки загрузки env
     model_config = SettingsConfigDict(
-        env_file="../../.env",            # если .env есть — значения из него переопределят дефолты
+        env_file=ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
     )
