@@ -1,119 +1,89 @@
-# src/api/auth.py
-
-from uuid import UUID, uuid4
-from typing import Literal
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, EmailStr, ConfigDict
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from src.api.deps import get_current_user
-from src.core.db import get_session
-from src.core.security import verify_password, hash_password, create_access_token
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+
+from src.api.deps import get_db, get_current_user
+from src.core.config import settings
+from src.core.security import (
+    create_access_token,
+    get_password_hash,
+    verify_password,
+)
 from src.models.user import User
+from src.schemas.auth import Token
+from src.schemas.user import UserCreate, UserRead
 
-router = APIRouter(prefix="/auth", tags=["auth"])
-
-
-# ====== Pydantic-схемы ======
-
-class LoginIn(BaseModel):
-    email: EmailStr
-    password: str
+router = APIRouter()
 
 
-class TokenOut(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-
-
-class UserOut(BaseModel):
-    """
-    То, что мы возвращаем наружу (без password_hash)
-    """
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
-    email: EmailStr
-    role: str
-
-
-class UserCreate(BaseModel):
-    """
-    Тело запроса для регистрации.
-    Через Swagger будет очень удобно:
-    - email
-    - password
-    - role (admin/worker)
-    """
-    email: EmailStr
-    password: str
-    role: Literal["admin", "worker"] = "worker"
-
-
-# ====== Ручка логина ======
-
-@router.post("/login", response_model=TokenOut)
-async def login(
-    data: LoginIn,
-    session: AsyncSession = Depends(get_session),
-) -> TokenOut:
-    stmt = select(User).where(User.email == data.email)
-    user = await session.scalar(stmt)
-
-    if not user or not verify_password(data.password, user.password_hash):
+@router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
+def register_user(
+    user_in: UserCreate,
+    db: Session = Depends(get_db),
+) -> User:
+    existing_user = db.query(User).filter(User.email == user_in.email).first()
+    if existing_user is not None:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверный email или пароль",
-        )
-
-    token = create_access_token({"sub": str(user.id), "role": user.role})
-    return TokenOut(access_token=token)
-
-
-# ====== Ручка регистрации пользователя ======
-
-@router.post("/register", response_model=UserOut, status_code=201)
-async def register_user(
-    data: UserCreate,
-    session: AsyncSession = Depends(get_session),
-) -> UserOut:
-    """
-    Удобная регистрация пользователя через Swagger.
-
-    Пока хэндлер открыт. Для боевого режима можно будет повесить
-    проверку «только админ» через Depends(get_current_user).
-    """
-
-    # Проверяем, что такого email ещё нет
-    stmt = select(User).where(User.email == data.email)
-    existing = await session.scalar(stmt)
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Пользователь с таким email уже существует",
         )
 
-    # Хэшируем пароль
-    password_hash = hash_password(data.password)
-
-    # Создаём пользователя
+    hashed_password = get_password_hash(user_in.password)
     user = User(
-        id=uuid4(),
-        email=data.email,
-        password_hash=password_hash,
-        role=data.role,
+        email=user_in.email,
+        full_name=user_in.full_name,
+        hashed_password=hashed_password,
+        is_active=True,
     )
-
-    session.add(user)
-    await session.commit()
-    await session.refresh(user)
-
+    db.add(user)
+    db.commit()
+    db.refresh(user)
     return user
 
 
-# ====== /auth/me (если ещё нет – можешь добавить) ======
+@router.post("/login", response_model=Token)
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+) -> Token:
+    user = db.query(User).filter(User.email == form_data.username).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Неверный email или пароль",
+        )
 
-@router.get("/me", response_model=UserOut)
-async def get_me(current_user: User = Depends(get_current_user)) -> UserOut:
+    if not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Неверный email или пароль",
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Пользователь деактивирован",
+        )
+
+    access_token_expires = timedelta(
+        minutes=settings.access_token_expire_minutes,
+    )
+    access_token = create_access_token(
+        subject=str(user.id),
+        expires_minutes=int(access_token_expires.total_seconds() / 60),
+    )
+
+    token = Token(
+        access_token=access_token,
+        token_type="bearer",
+    )
+    return token
+
+
+@router.get("/me", response_model=UserRead)
+def read_current_user(
+    current_user: User = Depends(get_current_user),
+) -> User:
     return current_user

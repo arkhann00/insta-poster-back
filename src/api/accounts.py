@@ -1,110 +1,100 @@
-from datetime import datetime
-from typing import Annotated
-import uuid
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
-from sqlalchemy import select, delete
-from uuid import UUID
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
-from ..core.db import get_session
-from ..core.security import encrypt_ig_token
-from ..models.instagram_account import InstagramAccount
-from ..models.user import User
-from .deps import get_current_user, get_current_admin
+from src.api.deps import get_current_user, get_db
+from src.models.business_account import BusinessAccount
+from src.models.user import User
+from src.schemas.business_account import (
+    BusinessAccountCreate,
+    BusinessAccountRead,
+)
 
-router = APIRouter(prefix="/accounts", tags=["accounts"])
-
-class AccountBase(BaseModel):
-    name: str
-    ig_user_id: str
-    token_expires_at: datetime | None = None
+router = APIRouter()
 
 
-class AccountCreate(AccountBase):
-    access_token: str
+@router.get("/", response_model=List[BusinessAccountRead])
+def list_business_accounts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[BusinessAccount]:
+    accounts = (
+        db.query(BusinessAccount)
+        .filter(BusinessAccount.user_id == current_user.id)
+        .order_by(BusinessAccount.id)
+        .all()
+    )
+    return accounts
 
-
-class AccountOut(AccountBase):
-    id: UUID
-    created_at: datetime
-
-    class Config:
-        from_attributes = True  # для Pydantic v2
-
-
-# ===== Ручки =====
 
 @router.post(
-    "",
-    response_model=AccountOut,
+    "/",
+    response_model=BusinessAccountRead,
     status_code=status.HTTP_201_CREATED,
 )
-async def create_account(
-    payload: AccountCreate,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    admin: Annotated[User, Depends(get_current_admin)],
-):
-    # Проверяем уникальность ig_user_id
-    existing = await session.execute(
-        select(InstagramAccount).where(
-            InstagramAccount.ig_user_id == payload.ig_user_id
-        )
+def create_business_account(
+    account_in: BusinessAccountCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> BusinessAccount:
+    account = BusinessAccount(
+        user_id=current_user.id,
+        name=account_in.name,
+        external_id=account_in.external_id,
+        access_token=account_in.access_token,
+        is_active=account_in.is_active,
     )
-    if existing.scalar_one_or_none():
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+@router.get("/{account_id}", response_model=BusinessAccountRead)
+def get_business_account(
+    account_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> BusinessAccount:
+    account = (
+        db.query(BusinessAccount)
+        .filter(
+            BusinessAccount.id == account_id,
+            BusinessAccount.user_id == current_user.id,
+        )
+        .first()
+    )
+    if account is None:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Instagram account with this ig_user_id already exists",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Бизнес-аккаунт не найден",
         )
-
-    acc = InstagramAccount(
-        name=payload.name,
-        ig_user_id=payload.ig_user_id,
-        access_token=payload.access_token,
-        token_expires_at=payload.token_expires_at,
-        created_by=admin.id,
-    )
-
-    session.add(acc)
-    await session.commit()
-    await session.refresh(acc)
-    return acc
-
-
-@router.get("", response_model=list[AccountOut])
-async def list_accounts(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    current_user: Annotated[User, Depends(get_current_user)],
-):
-    # Пока нет разделения по правам здесь: любой авторизованный видит список
-    result = await session.execute(select(InstagramAccount))
-    accounts = result.scalars().all()
-    return accounts
+    return account
 
 
 @router.delete(
     "/{account_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def delete_account(
-    account_id: uuid.UUID,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    admin: Annotated[User, Depends(get_current_admin)],
-):
-    # Проверим, что аккаунт есть
-    result = await session.execute(
-        select(InstagramAccount).where(InstagramAccount.id == account_id)
+def delete_business_account(
+    account_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    account = (
+        db.query(BusinessAccount)
+        .filter(
+            BusinessAccount.id == account_id,
+            BusinessAccount.user_id == current_user.id,
+        )
+        .first()
     )
-    acc = result.scalar_one_or_none()
-    if not acc:
+    if account is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Account not found",
+            detail="Бизнес-аккаунт не найден",
         )
 
-    await session.execute(
-        delete(InstagramAccount).where(InstagramAccount.id == account_id)
-    )
-    await session.commit()
-    return
+    db.delete(account)
+    db.commit()

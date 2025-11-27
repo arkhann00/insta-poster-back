@@ -1,14 +1,40 @@
-from sqlalchemy import text
-from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
-import uuid
-from ..core.db import Base
+from sqlalchemy import Boolean, Column, Integer, String
+from sqlalchemy.orm import relationship
+
+from src.db.base import Base
+
 
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    email: Mapped[str] = mapped_column(unique=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(nullable=False)
-    role: Mapped[str] = mapped_column(default="admin")  # 'admin' | 'worker'
-    created_at: Mapped[str] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    full_name = Column(String, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    # Бизнес-аккаунты пользователя
+    business_accounts = relationship(
+        "BusinessAccount",
+        back_populates="owner",
+        cascade="all, delete-orphan",
+    )
+
+    # Рилсы пользователя
+    reels = relationship(
+        "Reel",
+        back_populates="owner",
+        cascade="all, delete-orphan",
+    )
+
+    # Логи назначений рилсов
+    reel_assignments = relationship(
+        "ReelAssignment",
+        back_populates="owner",
+        cascade="all, delete-orphan",
+    )
+    assignments = relationship(
+        "ReelAssignment",
+        back_populates="owner",
+        cascade="all, delete-orphan",
+    )

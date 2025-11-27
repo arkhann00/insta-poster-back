@@ -1,233 +1,230 @@
-# src/integrations/instagram.py
-
-from __future__ import annotations
-
-from typing import Optional
-import asyncio
 import logging
+import time
+from pathlib import Path
 
 import httpx
 
 from src.core.config import settings
-from src.models.instagram_account import InstagramAccount
-from src.models.media_asset import MediaAsset
 
-API_PUBLIC_URL = settings.API_PUBLIC_URL
-
-logger = logging.getLogger("instagram")
+logger = logging.getLogger(__name__)
 
 
 class InstagramPublishError(Exception):
-    pass
+    """Ошибка при публикации рилса в Instagram."""
 
 
-async def _wait_for_container_ready(
-    client: httpx.AsyncClient,
-    creation_id: str,
-    access_token: str,
-    max_wait_seconds: int = 300,
-    poll_interval_seconds: int = 5,
-) -> None:
+GRAPH_BASE_URL = f"https://graph.facebook.com/{settings.instagram_graph_api_version}"
+
+
+def _graph_url(path: str) -> str:
+    return f"{GRAPH_BASE_URL}/{path.lstrip('/')}"
+
+
+def build_video_url_for_reel(*, reel, backend_base_url: str | None = None) -> str:
     """
-    Ждёт, пока контейнер медиа станет готов к публикации (status_code = FINISHED).
-    Если статус ERROR или по таймауту — выбрасывает InstagramPublishError.
+    Собираем публичный URL вида:
+    {backend_base_url}/media/reels/{user_id}/{filename}
     """
+    base_url = (backend_base_url or settings.backend_base_url).rstrip("/")
+    file_name = Path(reel.file_path).name
+    return f"{base_url}/media/reels/{reel.user_id}/{file_name}"
 
-    status_url = f"https://graph.facebook.com/v21.0/{creation_id}"
-    elapsed = 0
-    last_status: Optional[str] = None
-    last_raw: Optional[dict] = None
 
-    while elapsed < max_wait_seconds:
-        resp = await client.get(
-            status_url,
-            params={
-                # Просим не только status_code, но и status (может содержать пояснение)
-                "fields": "status_code,status",
-                "access_token": access_token,
-            },
-        )
-        data = resp.json()
-        last_raw = data
+def _log_http_request(method: str, url: str, **kwargs) -> None:
+    # Логируем без токена целиком (чтобы не светить его полностью)
+    safe_kwargs = dict(kwargs)
+    data = safe_kwargs.get("data")
+    params = safe_kwargs.get("params")
 
-        logger.info("[instagram] container %s poll response: %s", creation_id, data)
+    def _mask_token(obj):
+        if not isinstance(obj, dict):
+            return obj
+        masked = dict(obj)
+        token = masked.get("access_token")
+        if isinstance(token, str) and len(token) > 10:
+            masked["access_token"] = token[:6] + "..." + token[-4:]
+        return masked
 
-        if "error" in data:
-            # Ошибка самого Graph API
-            raise InstagramPublishError(
-                f"Error checking media container status: {data['error']}"
-            )
+    if data:
+        safe_kwargs["data"] = _mask_token(data)
+    if params:
+        safe_kwargs["params"] = _mask_token(params)
 
-        status = data.get("status_code")
-        last_status = status
+    logger.info("Instagram API request: %s %s %s", method, url, safe_kwargs)
 
-        if status == "FINISHED":
-            logger.info("[instagram] container %s is FINISHED", creation_id)
-            return
 
-        if status == "ERROR":
-            # Instagram не смог обработать медиаданные (формат, длительность, кодеки и т.п.)
-            logger.error(
-                "[instagram] container %s processing ERROR, raw=%s",
-                creation_id,
-                data,
-            )
-            raise InstagramPublishError(
-                f"Media container processing failed with status ERROR: {data}"
-            )
-
-        # Всё ещё IN_PROGRESS или что-то иное — ждём и пробуем снова
-        await asyncio.sleep(poll_interval_seconds)
-        elapsed += poll_interval_seconds
-
-    # Если вышли из цикла по таймауту
-    logger.error(
-        "[instagram] container %s timeout. Last status=%r, raw=%s",
-        creation_id,
-        last_status,
-        last_raw,
-    )
-    raise InstagramPublishError(
-        f"Timeout waiting for media container {creation_id} to be ready. "
-        f"Last known status: {last_status!r}, raw={last_raw}"
+def _log_http_response(resp: httpx.Response) -> None:
+    try:
+        json_body = resp.json()
+    except Exception:
+        json_body = resp.text
+    logger.info(
+        "Instagram API response: status=%s body=%s",
+        resp.status_code,
+        json_body,
     )
 
 
-async def publish_reel_to_instagram(
-    account: InstagramAccount,
-    media: MediaAsset,
-    caption: Optional[str],
-) -> str:
+def publish_reel_to_instagram(*, reel, account) -> str:
     """
-    Публикует Reels в Instagram для данного бизнес-аккаунта.
-    Возвращает instagram_media_id.
+    Полный цикл публикации рилса в Instagram:
+    1. Создаём media container (media_type=REELS, video_url=...).
+    2. Ждём, пока status_code станет FINISHED.
+    3. Делаем media_publish и получаем ig_media_id.
+    Возвращает ig_media_id.
     """
-
-    if not account.ig_user_id:
-        raise InstagramPublishError("Instagram account has no ig_user_id")
+    if not account.external_id:
+        raise InstagramPublishError("У бизнес-аккаунта не заполнен external_id (IG user id)")
 
     if not account.access_token:
-        raise InstagramPublishError("Instagram account has no access_token")
+        raise InstagramPublishError("У бизнес-аккаунта не заполнен access_token")
 
-    # Публичный URL до файла в твоём бэке
-    video_url = f"{API_PUBLIC_URL}/media/files/{media.id}"
+    video_url = build_video_url_for_reel(reel=reel)
     logger.info(
-        "[instagram] publish_reel_to_instagram for account=%s, media=%s, video_url=%s",
+        "Старт публикации рилса: reel_id=%s user_id=%s account_id=%s ig_user_id=%s video_url=%s",
+        reel.id,
+        reel.user_id,
         account.id,
-        media.id,
+        account.external_id,
         video_url,
     )
 
-    creation_url = f"https://graph.facebook.com/v21.0/{account.ig_user_id}/media"
+    # 1. Создание media container
+    create_url = _graph_url(f"{account.external_id}/media")
+    create_data = {
+        "media_type": "REELS",
+        "video_url": video_url,
+        "caption": reel.caption or "",
+        "share_to_feed": "true",
+        "access_token": account.access_token,
+    }
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        # 1) создаём контейнер медиа (REELS)
-        creation_resp = await client.post(
-            creation_url,
-            data={
-                "media_type": "REELS",
-                "video_url": video_url,
-                "caption": caption or "",
-                "access_token": account.access_token,
-            },
+    _log_http_request("POST", create_url, data=create_data)
+
+    try:
+        create_resp = httpx.post(create_url, data=create_data, timeout=60)
+    except httpx.RequestError as exc:
+        logger.exception("Ошибка сети при создании media container: %s", exc)
+        raise InstagramPublishError(f"Ошибка сети при создании media container: {exc}") from exc
+
+    _log_http_response(create_resp)
+
+    try:
+        create_body = create_resp.json()
+    except Exception:
+        create_body = {"raw": create_resp.text}
+
+    if create_resp.status_code != 200:
+        raise InstagramPublishError(
+            f"Ошибка создания media container: status={create_resp.status_code}, body={create_body}"
         )
+
+    creation_id = create_body.get("id")
+    if not creation_id:
+        raise InstagramPublishError(f"В ответе на создание контейнера нет id: {create_body}")
+
+    logger.info(
+        "Media container создан: creation_id=%s reel_id=%s account_id=%s",
+        creation_id,
+        reel.id,
+        account.id,
+    )
+
+    # 2. Ожидание обработки контейнера
+    status_url = _graph_url(creation_id)
+    max_attempts = 10
+
+    for attempt in range(1, max_attempts + 1):
+        params = {
+            "fields": "status_code",
+            "access_token": account.access_token,
+        }
+        _log_http_request("GET", status_url, params=params)
 
         try:
-            creation_data = creation_resp.json()
-        except Exception:
+            status_resp = httpx.get(status_url, params=params, timeout=30)
+        except httpx.RequestError as exc:
             logger.exception(
-                "[instagram] failed to parse creation_resp json, text=%s",
-                creation_resp.text,
+                "Ошибка сети при проверке статуса контейнера %s: %s",
+                creation_id,
+                exc,
             )
             raise InstagramPublishError(
-                f"Error parsing media creation response: {creation_resp.text}"
-            )
+                f"Ошибка сети при проверке статуса контейнера {creation_id}: {exc}"
+            ) from exc
 
-        logger.info(
-            "[instagram] media creation response for account=%s, media=%s: %s",
-            account.id,
-            media.id,
-            creation_data,
-        )
-
-        if "error" in creation_data:
-            logger.error(
-                "[instagram] error creating media container: %s",
-                creation_data["error"],
-            )
-            raise InstagramPublishError(
-                f"Error creating media container: {creation_data['error']}"
-            )
-
-        creation_id = creation_data.get("id")
-        if not creation_id:
-            logger.error(
-                "[instagram] media container created without id. Raw response: %s",
-                creation_data,
-            )
-            raise InstagramPublishError(
-                f"Media container created without id: {creation_data}"
-            )
-
-        # 2) ждём готовности контейнера
-        await _wait_for_container_ready(
-            client=client,
-            creation_id=creation_id,
-            access_token=account.access_token,
-            max_wait_seconds=300,
-            poll_interval_seconds=5,
-        )
-
-        # 3) публикуем контейнер
-        publish_url = f"https://graph.facebook.com/v24.0/{account.ig_user_id}/media_publish"
-
-        publish_resp = await client.post(
-            publish_url,
-            data={
-                "creation_id": creation_id,
-                "access_token": account.access_token,
-            },
-        )
+        _log_http_response(status_resp)
 
         try:
-            publish_data = publish_resp.json()
+            status_body = status_resp.json()
         except Exception:
-            logger.exception(
-                "[instagram] failed to parse publish_resp json, text=%s",
-                publish_resp.text,
-            )
-            raise InstagramPublishError(
-                f"Error parsing media publish response: {publish_resp.text}"
-            )
+            status_body = {"raw": status_resp.text}
 
+        status_code = status_body.get("status_code")
         logger.info(
-            "[instagram] media publish response for account=%s, media=%s: %s",
-            account.id,
-            media.id,
-            publish_data,
+            "Статус контейнера %s: попытка=%s status_code=%s body=%s",
+            creation_id,
+            attempt,
+            status_code,
+            status_body,
         )
 
-        if "error" in publish_data:
-            logger.error(
-                "[instagram] error publishing media: %s",
-                publish_data["error"],
-            )
+        if status_code == "FINISHED":
+            break
+        if status_code == "ERROR":
             raise InstagramPublishError(
-                f"Error publishing media: {publish_data['error']}"
+                f"Instagram вернул статус ERROR для контейнера {creation_id}: {status_body}"
             )
 
-        ig_media_id = publish_data.get("id")
-        if not ig_media_id:
-            logger.error(
-                "[instagram] publish response without id. Raw response: %s",
-                publish_data,
-            )
-            raise InstagramPublishError(
-                f"Publish response without id: {publish_data}"
-            )
-
-        logger.info(
-            "[instagram] reel published successfully. ig_media_id=%s",
-            ig_media_id,
+        time.sleep(5)
+    else:
+        # цикл закончился без break
+        raise InstagramPublishError(
+            f"Таймаут ожидания обработки контейнера {creation_id}"
         )
-        return ig_media_id
+
+    # 3. Публикация контейнера
+    publish_url = _graph_url(f"{account.external_id}/media_publish")
+    publish_data = {
+        "creation_id": creation_id,
+        "access_token": account.access_token,
+    }
+
+    _log_http_request("POST", publish_url, data=publish_data)
+
+    try:
+        publish_resp = httpx.post(publish_url, data=publish_data, timeout=60)
+    except httpx.RequestError as exc:
+        logger.exception(
+            "Ошибка сети при media_publish для контейнера %s: %s",
+            creation_id,
+            exc,
+        )
+        raise InstagramPublishError(
+            f"Ошибка сети при media_publish для контейнера {creation_id}: {exc}"
+        ) from exc
+
+    _log_http_response(publish_resp)
+
+    try:
+        publish_body = publish_resp.json()
+    except Exception:
+        publish_body = {"raw": publish_resp.text}
+
+    if publish_resp.status_code != 200:
+        raise InstagramPublishError(
+            f"Ошибка media_publish: status={publish_resp.status_code}, body={publish_body}"
+        )
+
+    ig_media_id = publish_body.get("id")
+    if not ig_media_id:
+        raise InstagramPublishError(f"В ответе media_publish нет id: {publish_body}")
+
+    logger.info(
+        "Успешная публикация рилса: reel_id=%s account_id=%s ig_media_id=%s",
+        reel.id,
+        account.id,
+        ig_media_id,
+    )
+
+    return ig_media_id
