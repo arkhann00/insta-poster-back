@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     project_name: str = "Insta Poster"
 
     # Разрешённые источники для фронта
-    cors_origins: List[str] = ["http://localhost:5173"]
+    cors_origins: List[str] = ["http://localhost:5173", "http://62.113.42.113:3000"]
 
     # Публичный URL бэкенда, по которому Instagram будет забирать видео
     backend_base_url: str = Field(
