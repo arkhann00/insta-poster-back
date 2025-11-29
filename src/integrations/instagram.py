@@ -94,7 +94,7 @@ def publish_reel_to_instagram(*, reel, account) -> str:
     create_data = {
         "media_type": "REELS",
         "video_url": video_url,
-        "caption": reel.caption or "",
+        "caption": "",
         "share_to_feed": "true",
         "access_token": account.access_token,
     }

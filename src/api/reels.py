@@ -187,6 +187,7 @@ def publish_reels(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ReelsPublishResult:
+    # Берём все НЕИСПОЛЬЗОВАННЫЕ рилсы
     reels = (
         db.query(Reel)
         .filter(
@@ -197,6 +198,7 @@ def publish_reels(
         .all()
     )
 
+    # И все активные бизнес-аккаунты
     accounts = (
         db.query(BusinessAccount)
         .filter(
@@ -222,6 +224,21 @@ def publish_reels(
         reel = reels[index]
         account = accounts[index]
 
+        # ⬇️ НОВОЕ: если уже есть успешная публикация этого рилса на этот аккаунт – пропускаем
+        existing_published = (
+            db.query(ReelAssignment)
+            .filter(
+                ReelAssignment.user_id == current_user.id,
+                ReelAssignment.reel_id == reel.id,
+                ReelAssignment.business_account_id == account.id,
+                ReelAssignment.status == "published",
+            )
+            .first()
+        )
+        if existing_published:
+            # уже публиковали этот рилс на этот аккаунт – не создаём новую попытку
+            continue
+
         assignment = ReelAssignment(
             user_id=current_user.id,
             reel_id=reel.id,
@@ -238,6 +255,7 @@ def publish_reels(
             assignment.status = "published"
             assignment.error_message = None
 
+            # отмечаем рилс как использованный
             reel.is_used = True
 
             try:
@@ -257,13 +275,14 @@ def publish_reels(
 
     db.commit()
 
+    # Важно: reels_left_unassigned / accounts_without_reels считаем по исходным спискам,
+    # а не по тому, что реально опубликовалось.
     return ReelsPublishResult(
         published=published_pairs,
         total_published=len(published_pairs),
         reels_left_unassigned=len(reels) - pairs_count,
         accounts_without_reels=len(accounts) - pairs_count,
     )
-
 
 @router.get(
     "/assignments",
